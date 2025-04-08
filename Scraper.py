@@ -1,235 +1,187 @@
 import requests
 import json
-import time
-from typing import Dict, List, Optional, Union
-
+import re
+from typing import Dict, List
 
 class RappiScraper:
-    """
-    A class to search for products on Rappi from Líder or Líder Express stores.
-    
-    This scraper uses Rappi's search API to find products and returns formatted
-    results according to the specified schema.
-    """
-    
-    def __init__(self, proxy_settings: Dict[str, str] = None):
-        """
-        Initialize the RappiScraper with optional proxy settings.
-        
-        Args:
-            proxy_settings: Dictionary containing proxy configuration.
-        """
-        self.base_url = "https://services.rappi.cl/api/cpgs/search/v2/store"
+    def __init__(self, use_proxy=False):
+       
+        self.base_url = "https://www.rappi.cl/tiendas"
         self.session = requests.Session()
         
-        # Default headers to mimic browser behavior
+        # Basic headers
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Origin": "https://www.rappi.cl",
-            "Referer": "https://www.rappi.cl/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
         }
         
-        # Set up proxy if provided
-        if proxy_settings:
-            self.proxies = proxy_settings
-        else:
-            # Default proxy settings from the task
+        # Proxy setup
+        if use_proxy:
             proxy = 'geo.iproyal.com:12321'
             proxy_auth = 'Qp2YvQ9hRCyienEj:GVPXaVCFvaFoMgZc_country-us'
             self.proxies = {
                 'http': f'http://{proxy_auth}@{proxy}',
                 'https': f'http://{proxy_auth}@{proxy}'
             }
-        
-        # Initialize cookies
-        self.cookies = self._get_cookies()
+        else:
+            self.proxies = None
     
-    def _get_cookies(self) -> Dict[str, str]:
-        """
-        Get initial cookies from Rappi's website.
+    def search_products(self, query, store_id="900020469"):
+        # Create search URL
+        url = f"{self.base_url}/{store_id}-expresslider/s?term={query}"
         
-        Returns:
-            Dictionary of cookies.
-        """
+        print(f"Searching for '{query}'...")
+        
         try:
+            # Get the search page
             response = self.session.get(
-                "https://www.rappi.cl/",
-                headers=self.headers,
-                proxies=self.proxies
-            )
-            return self.session.cookies.get_dict()
-        except Exception as e:
-            print(f"Error getting cookies: {e}")
-            return {}
-    
-    def refresh_cookies(self) -> None:
-        """Refresh the session cookies."""
-        self.cookies = self._get_cookies()
-    
-    def search_products(self, query: str, store_id: str = "900020469") -> List[Dict[str, Union[str, int, None]]]:
-        """
-        Search for products on Rappi.
-        
-        Args:
-            query: Search term to look for.
-            store_id: ID of the store to search in (default is Express Líder).
-        
-        Returns:
-            List of product dictionaries formatted according to the schema.
-        """
-        url = f"{self.base_url}/{store_id}/products"
-        
-        # Payload for the search request
-        payload = {
-            "search": query,
-            # Add any additional parameters if needed
-        }
-        
-        try:
-            response = self.session.post(
                 url,
                 headers=self.headers,
-                json=payload,
-                cookies=self.cookies,
-                proxies=self.proxies
+                proxies=self.proxies,
+                timeout=15
             )
             
-            if response.status_code == 200:
-                data = response.json()
-                return self._parse_products(data)
-            else:
+            if response.status_code != 200:
                 print(f"Error: Status code {response.status_code}")
                 return []
-        
+            
+            # Extract the Next.js data - this is the key part that works
+            next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', 
+                                        response.text, re.DOTALL)
+            if not next_data_match:
+                print("No Next.js data found")
+                return []
+            
+            # Parse the JSON data
+            json_data = json.loads(next_data_match.group(1))
+            
+            # Find the products - using the traversal approach from the working version
+            products = self._find_products(json_data)
+            
+            if not products:
+                print("Could not find products in data")
+                return []
+            
+            # Format products (simplified)
+            result = []
+            for product in products:
+                if not product.get("name"):
+                    continue
+                
+                # Extract the product ID
+                product_id = product.get("id", "")
+                
+                # Extract the image URL
+                image_url = product.get("image", "")
+                
+                # Extract prices
+                price = product.get("price", 0)
+                
+                # Extract promotion details
+                promo_price = None
+                promo_details = None
+                if product.get("have_discount", False):
+                    promo_price = product.get("discountPrice")
+                    discount = product.get("discount", 0)
+                    if discount:
+                        promo_details = f"{discount}% off"
+                
+                result.append({
+                    "name": product.get("name", ""),
+                    "product_link": f"https://www.rappi.cl/tiendas/{store_id}/producto/{product_id}",
+                    "image": image_url,
+                    "price": price,
+                    "promotion_price": promo_price,
+                    "promotion_details": promo_details
+                })
+            
+            return result
+                
+        except requests.exceptions.ProxyError:
+            # Try again without proxy if proxy fails
+            if self.proxies:
+                print("Proxy error. Retrying without proxy...")
+                self.proxies = None
+                return self.search_products(query, store_id)
+            return []
         except Exception as e:
-            print(f"Error during search: {e}")
+            print(f"Error: {e}")
             return []
     
-    def _parse_products(self, data: Dict) -> List[Dict[str, Union[str, int, None]]]:
+    def _find_products(self, data):
         """
-        Parse the API response and extract product information.
-        
-        Args:
-            data: JSON response from the API.
-        
-        Returns:
-            List of products formatted according to the schema.
+        Find products array in the JSON data by trying various paths
+        and traversing nested structures.
         """
-        formatted_products = []
+        products = None
         
-        # Extract products from the response
-        products = data.get("products", [])
+        # Try common paths first
+        if "pageProps" in data and "props" in data["pageProps"]:
+            props = data["pageProps"]["props"]
+            products = props.get("products") or props.get("items") or props.get("results")
         
-        for product in products:
-            # Map product data to required schema
-            formatted_product = {
-                "name": product.get("name", ""),
-                "product_link": f"https://www.rappi.cl/tiendas/{product.get('store_id')}/producto/{product.get('product_id')}",
-                "image": f"https://images.rappi.cl/products/{product.get('image')}.jpg" if product.get("image") else None,
-                "price": product.get("price", 0),
-                "promotion_price": product.get("real_price", product.get("price", 0)) if product.get("have_discount", False) else None,
-                "promotion_details": self._get_promotion_details(product)
-            }
+        if not products and "products" in data:
+            products = data["products"]
             
-            formatted_products.append(formatted_product)
+        if not products and "state" in data:
+            state = data["state"]
+            products = state.get("products") or state.get("searchResults")
+            
+        # If no products found yet, try recursive traversal (simplified)
+        if not products:
+            for path, value in self._traverse_dict(data):
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    # Check if this looks like a product array
+                    if "name" in value[0] and ("price" in value[0] or "prices" in value[0]):
+                        products = value
+                        print(f"Found products at: {path}")
+                        break
         
-        return formatted_products
+        return products
     
-    def _get_promotion_details(self, product: Dict) -> Optional[str]:
+    def _traverse_dict(self, d, path=""):
         """
-        Extract promotion details from a product.
-        
-        Args:
-            product: Product data dictionary.
-        
-        Returns:
-            String with promotion details or None if no promotion.
+        Simplified dictionary traversal to find nested values
         """
-        # Check various promotion fields to construct a detail string
-        if product.get("have_discount", False):
-            discount_type = product.get("discount_type", "")
-            discount = product.get("discount", 0)
-            
-            if discount_type and discount:
-                return f"{discount_type} {discount}% off"
-            
-        # Check for bundle discounts
-        if product.get("discounts_bundle", {}).get("deal"):
-            deal = product.get("discounts_bundle", {}).get("deal", {})
-            return f"Buy {deal.get('min_units')} get {deal.get('discount')}% off"
-            
-        # Check for step discounts
-        if product.get("discount_step", {}).get("type"):
-            step = product.get("discount_step", {})
-            return f"Buy {step.get('min_units')} or more for {step.get('discount')}% off"
-        
-        return None
-    
-    def estimate_cookie_expiration(self, max_requests: int = 100, delay: int = 5) -> int:
-        """
-        Estimate how many requests can be made before cookies expire.
-        
-        Args:
-            max_requests: Maximum number of requests to try.
-            delay: Delay between requests in seconds.
-        
-        Returns:
-            Number of successful requests before failure.
-        """
-        successful_requests = 0
-        
-        for i in range(max_requests):
-            try:
-                # Make a simple search request
-                result = self.search_products("pan", "900020469")
+        if isinstance(d, dict):
+            for key, value in d.items():
+                new_path = f"{path}.{key}" if path else key
+                yield (new_path, value)
                 
-                if not result:
-                    print(f"Cookies expired after {successful_requests} requests")
-                    return successful_requests
-                
-                successful_requests += 1
-                print(f"Successfully made {successful_requests} requests")
-                
-                # Add delay to be respectful
-                time.sleep(delay)
-                
-            except Exception as e:
-                print(f"Error at request {successful_requests + 1}: {e}")
-                return successful_requests
+                # Recursively traverse nested structures
+                if isinstance(value, (dict, list)):
+                    yield from self._traverse_dict(value, new_path)
         
-        return successful_requests
-
+        elif isinstance(d, list):
+            for i, item in enumerate(d):
+                new_path = f"{path}[{i}]"
+                if isinstance(item, (dict, list)):
+                    yield from self._traverse_dict(item, new_path)
 
 def main():
-    """Main function to demonstrate the scraper."""
-    # Initialize the proxy settings
-    proxy = 'geo.iproyal.com:12321'
-    proxy_auth = 'Qp2YvQ9hRCyienEj:GVPXaVCFvaFoMgZc_country-us'
-    proxies = {
-        'http': f'http://{proxy_auth}@{proxy}',
-        'https': f'http://{proxy_auth}@{proxy}'
-    }
+    # Simple menu
+    use_proxy = input("Use proxy? (y/n): ").lower() == 'y'
+    scraper = RappiScraper(use_proxy=use_proxy)
     
-    # Initialize the scraper
-    scraper = RappiScraper(proxies)
-    
-    # Get user input for search term and store
+    # Get search term
     search_term = input("Enter search term: ")
-    store_id = input("Enter store ID (default: 900020469 for Express Líder): ") or "900020469"
+    store_id = input("Enter store ID (default: 900020469): ") or "900020469"
     
-    # Search for products
-    print(f"Searching for '{search_term}' in store {store_id}...")
+    # Do the search
     products = scraper.search_products(search_term, store_id)
     
-    # Display results
+    # Show results
     if products:
-        print(f"Found {len(products)} products:")
-        print(json.dumps(products, indent=2, ensure_ascii=False))
+        print(f"Found {len(products)} products")
+        # Show first 3 only
+        print(json.dumps(products[:3], indent=2))
+        
+        # Save all to file
+        with open('results.json', 'w', encoding='utf-8') as f:
+            json.dump(products, f, indent=2, ensure_ascii=False)
+        print(f"All results saved to results.json")
     else:
         print("No products found")
-
 
 if __name__ == "__main__":
     main()
