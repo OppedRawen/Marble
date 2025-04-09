@@ -7,6 +7,7 @@
 Initially I tried to directly access Rappi's product API but encountered authentication issues.
 
 ![alt text](image-1.png)
+
  After updated instructions, I discovered another approach by analyzing the network requests during product searches.
 
 I noticed that the Rappi's webpage uses Next.js to embeds all product data directly in the script id "__NEXT_DATA__". This allowed me to extract structured JSON data directly without HTML parsing.
